@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Körs när du pushar en tagg, t.ex. v0.1 eller v0.2
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest flake8 joblib scikit-learn
+
+      - name: Determine version and model
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+          if [ "$VERSION" == "v0.2" ]; then
+            echo "model=ridge" >> $GITHUB_OUTPUT
+          else
+            echo "model=linear" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute lowercase repo name
+        id: repo
+        run: |
+          REPO=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+
+      - name: Train model for release
+        run: |
+          export PYTHONPATH=$PYTHONPATH:$(pwd)
+          python src/train.py --version "${{ steps.version.outputs.version }}" --model "${{ steps.version.outputs.model }}"
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build Docker image
+        run: |
+          IMAGE="ghcr.io/${{ steps.repo.outputs.repo }}:${{ steps.version.outputs.version }}"
+          docker build -t "$IMAGE" .
+
+      - name: Smoke test container
+        run: |
+          IMAGE="ghcr.io/${{ steps.repo.outputs.repo }}:${{ steps.version.outputs.version }}"
+          docker run -d -p 8080:8080 --name test-container "$IMAGE"
+          sleep 10
+          curl -f http://localhost:8080/health
+          docker stop test-container
+          docker rm test-container
+
+      - name: Push Docker image
+        run: |
+          IMAGE="ghcr.io/${{ steps.repo.outputs.repo }}:${{ steps.version.outputs.version }}"
+          docker push "$IMAGE"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "Release ${{ steps.version.outputs.version }}"
+          body: |
+            ✅ Model trained with ${{ steps.version.outputs.model }} regression.
+            ✅ Docker image pushed to:
+            ghcr.io/${{ steps.repo.outputs.repo }}:${{ steps.version.outputs.version }}
